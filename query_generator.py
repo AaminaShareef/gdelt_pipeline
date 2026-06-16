@@ -1,202 +1,301 @@
 """
-Stage 1 — Query Generation
-Converts a client supply chain profile into one targeted GDELT search query
-per entity (supplier, raw material, logistics node, facility), using
-Llama 3.3 70B via OpenRouter (per system docs: Stage 1 LLM = Llama 3.3 70B,
-free tier — structured, templated task, no deep reasoning required).
+query_generator.py
+===================
+Converts a client supply chain profile (any client, not hardcoded) into a
+list of GDELT GKG / BigQuery search specs. Each spec is a dict:
+    {"type": ..., "anchor": ..., "where": <SQL boolean expression>}
 
-Each generated query object includes:
-  - bigquery_keywords: a short keyword phrase suited to GDELT GKG theme/location filtering
-  - doc_api_query:     a natural-language phrase suited to the GDELT DOC 2.0 API
-
-Input profile shape matches the client intake form / db.py exactly:
-{
-  "client_name": str,
-  "suppliers": [
-    {"name": str, "supplies": str, "location": str}, ...
-  ],
-  "materials": [
-    {"name": str, "sourced_from": str}, ...
-  ],
-  "logistics_nodes": [
-    {"name": str, "type": str, "role": str, "location": str}, ...
-  ],
-  "facilities": [
-    {"name": str, "location": str}, ...
-  ]
-}
+This is a pure logic module — no Flask, no BigQuery client, no I/O.
+gdelt_fetch.py imports generate_queries() and runs the SQL it produces.
 """
 
-import os
-import json
-import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# ==========================================================================
+# TRUSTED DOMAINS
+#   Two tiers, combined into one set used for both:
+#     A) SQL filter   -> SourceCommonName IN (...)   when discover_mode=False
+#     B) Post-fetch safety net via is_trusted()       in all modes
+# ==========================================================================
+TIER_1_DOMAINS = [
+    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk",
+    "bloomberg.com", "ft.com", "wsj.com", "theguardian.com",
+    "nytimes.com", "washingtonpost.com", "cnbc.com",
+    "aljazeera.com", "scmp.com", "thehindu.com",
+    "economictimes.indiatimes.com",
+]
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-QUERY_GEN_MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # Stage 1 model per system docs
+TIER_2_DOMAINS = [
+    # Gulf / Middle East English press
+    "arabnews.com", "gulfnews.com", "thenationalnews.com",
+    "khaleejtimes.com", "zawya.com", "menafn.com",
+    "albawaba.com", "middleeasteye.net",
+    # Energy, oil & gas trade publications
+    "oilprice.com", "rigzone.com", "offshore-energy.biz",
+    "naturalgasworld.com", "lngworldnews.com",
+    "energymonitor.ai", "energyintel.com",
+    "spglobal.com", "platts.com",
+    # Shipping and logistics trade press
+    "supplychaindive.com", "freightwaves.com", "joc.com",
+    "tradewindsnews.com", "lloydslist.com",
+    "seatrade-maritime.com", "hellenicshippingnews.com",
+    "marinetraffic.com",
+    # Chemical / petrochemical industry
+    "icis.com", "chemweek.com", "echemi.com",
+    # General Asia / electronics / manufacturing press (useful default coverage)
+    "nikkei.com", "asia.nikkei.com", "channelnewsasia.com",
+    "japantimes.co.jp", "koreaherald.com", "yna.co.kr",
+]
 
-SYSTEM_PROMPT = """You are a supply chain intelligence query generator.
+TRUSTED_DOMAINS = TIER_1_DOMAINS + TIER_2_DOMAINS
+TRUSTED_DOMAINS_SET = set(TRUSTED_DOMAINS)
 
-Given one supply chain entity (a supplier, raw material, logistics node, or
-facility) and its location, generate a focused news search query that would
-surface disruption-relevant articles about it.
-
-A good query combines:
-1. The entity name (company, commodity, port, facility, carrier)
-2. Its geographic context (city/region/country)
-3. Likely disruption keywords (e.g. strike, shortage, fire, flood, sanctions,
-   export ban, congestion, delay, shutdown, earthquake, drought, labor unrest)
-
-Respond ONLY with a JSON object, no preamble, no markdown fences, in this
-exact shape:
-
-{
-  "bigquery_keywords": "short keyword phrase, 5-8 words, entity + geo + 2-3 disruption terms",
-  "doc_api_query": "natural language search phrase, 6-10 words, entity + geo + disruption context"
-}
-"""
-
-USER_PROMPT_TEMPLATE = """Entity Type: {entity_type}
-Entity Name: {entity_name}
-Location / Geo Context: {location}
-Additional Context: {context}
-
-Generate the search query JSON for this entity."""
-
-
-def _call_query_llm(entity_type: str, entity_name: str, location: str, context: str = "") -> dict:
-    """Call Llama 3.3 70B via OpenRouter to generate a query for a single entity."""
-    payload = {
-        "model": QUERY_GEN_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": USER_PROMPT_TEMPLATE.format(
-                    entity_type=entity_type,
-                    entity_name=entity_name,
-                    location=location or "Unspecified",
-                    context=context or "N/A",
-                ),
-            },
-        ],
-        "temperature": 0.3,
-        "max_tokens": 300,
-    }
-
-    response = requests.post(
-        OPENROUTER_URL,
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
-    content = data["choices"][0]["message"]["content"].strip()
-
-    # Strip accidental markdown fences
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.startswith("json"):
-            content = content[4:].strip()
-
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        # Fallback: build a naive query from the entity fields
-        parsed = {
-            "bigquery_keywords": f"{entity_name} {location} disruption shortage delay".strip(),
-            "doc_api_query": f"{entity_name} {location} disruption".strip(),
-        }
-
-    return {
-        "entity_type": entity_type,
-        "entity_name": entity_name,
-        "location": location,
-        "bigquery_keywords": parsed.get("bigquery_keywords", ""),
-        "doc_api_query": parsed.get("doc_api_query", ""),
-    }
+MIN_VIABLE_TOKENS = 60
 
 
-# Entity types that map to specific search routing in the GDELT fetcher
-# (used downstream by gdelt_fetch.py to decide BigQuery vs DOC API)
-ENTITY_TYPE_ROUTING = {
-    "supplier": "bigquery",       # geo-heavy, theme filtering works well
-    "facility": "bigquery",       # geo-heavy
-    "logistics": "bigquery",      # geo + theme (ports, carriers)
-    "material": "doc_api",        # broad commodity keyword search
+# ==========================================================================
+# DISRUPTION THEME CODES (GDELT GKG V2Themes)
+#   Prefix-based: matching 'NATURAL_DISASTER' via LIKE also catches every
+#   sub-type (_FLOOD, _EARTHQUAKE, _TYPHOON, ...) for free.
+# ==========================================================================
+DOMAIN_THEMES = {
+    "conflict": [
+        "ARMEDCONFLICT", "WB_2462_POLITICAL_VIOLENCE_AND_WAR", "MILITARY",
+        "TERROR", "SANCTIONS", "BLOCKADE", "MARITIME_INCIDENT",
+        "MARITIME_PIRACY", "SEIGE", "STATE_OF_EMERGENCY",
+    ],
+    "energy": [
+        "ECON_OILPRICE", "ENV_OIL", "ENV_NATURALGAS", "ECON_GASOLINEPRICE",
+        "WB_507_ENERGY_AND_EXTRACTIVES", "WB_2298_REFINERIES",
+        "WB_2299_PIPELINES", "FUELPRICES",
+    ],
+    "logistics": [
+        "WB_135_TRANSPORT", "WB_793_TRANSPORT_AND_LOGISTICS_SERVICES",
+        "WB_167_PORTS", "WB_1817_CONGESTION", "WB_1805_WATERWAYS",
+        "CRISISLEX_C04_LOGISTICS_TRANSPORT", "CLOSURE", "DELAY",
+    ],
+    "commodity": [
+        "SHORTAGE", "ECON_TRADE_DISPUTE", "WB_698_TRADE",
+        "EPU_CATS_TRADE_POLICY", "WB_778_NON_TARIFF_MEASURES",
+        "ECON_BOYCOTT", "BAN", "WB_1079_COMMODITIES_AND_RESOURCES",
+    ],
+    "labour": [
+        "STRIKE", "PROTEST", "ECON_UNIONS", "WB_1670_TRADE_UNIONS",
+        "WB_855_LABOR_MARKETS", "UNEMPLOYMENT",
+    ],
+    "weather": [
+        "NATURAL_DISASTER", "MANMADE_DISASTER", "DISASTER_FIRE",
+        "WB_820_DISASTER_RISK_MANAGEMENT", "POWER_OUTAGE", "EVACUATION",
+    ],
+    "pandemic": [
+        "HEALTH_PANDEMIC", "WB_2167_PANDEMICS", "TAX_DISEASE_OUTBREAK",
+        "WB_2165_HEALTH_EMERGENCIES", "SOC_QUARANTINE",
+    ],
 }
 
+ALL_THEME_CODES = [t for codes in DOMAIN_THEMES.values() for t in codes]
 
-def generate_queries_for_profile(client_profile: dict, max_workers: int = 5) -> list:
+
+# ==========================================================================
+# SQL HELPERS
+# ==========================================================================
+def _sql_escape(s: str) -> str:
+    """Escape single quotes for safe inlining into a SQL string literal."""
+    return s.replace("'", "''")
+
+
+def _domains_in_clause() -> str:
+    """Build:  SourceCommonName IN ('reuters.com', 'apnews.com', ...)"""
+    quoted = ", ".join(f"'{_sql_escape(d)}'" for d in TRUSTED_DOMAINS)
+    return f"SourceCommonName IN ({quoted})"
+
+
+def _theme_or_clause(theme_codes) -> str:
     """
-    Generate GDELT queries for every entity in a client profile.
-
-    Returns a flat list of query objects:
-    {
-      "entity_type": "supplier" | "material" | "logistics" | "facility",
-      "entity_name": str,
-      "location": str,
-      "bigquery_keywords": str,
-      "doc_api_query": str,
-      "search_route": "bigquery" | "doc_api"
-    }
+    Build an OR group matching any GDELT GKG theme code:
+        (V2Themes LIKE '%CODE1%' OR V2Themes LIKE '%CODE2%' ...)
     """
-    tasks = []
+    ors = [f"V2Themes LIKE '%{_sql_escape(code)}%'" for code in theme_codes]
+    return "(" + " OR ".join(ors) + ")"
 
-    for s in client_profile.get("suppliers", []):
-        tasks.append(("supplier", s["name"], s.get("location", ""), s.get("supplies", "")))
 
-    for m in client_profile.get("materials", []):
-        tasks.append(("material", m["name"], m.get("sourced_from", ""), ""))
+# ==========================================================================
+# PROFILE VALIDATION
+#   Accepts a profile dict in the same shape as before, but now this is
+#   USER INPUT, not a hardcoded constant — so we validate defensively.
+# ==========================================================================
+class ProfileValidationError(Exception):
+    pass
 
-    for node in client_profile.get("logistics_nodes", []):
-        tasks.append(("logistics", node["name"], node.get("location", ""), node.get("role", "")))
 
-    for f in client_profile.get("facilities", []):
-        tasks.append(("facility", f["name"], f.get("location", ""), ""))
+REQUIRED_TOP_LEVEL_KEYS = {
+    "client_id", "tier1_suppliers", "raw_materials", "logistics", "own_facilities"
+}
 
-    results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_call_query_llm, entity_type, entity_name, location, context): (
-                entity_type, entity_name, location, context
+
+def validate_profile(profile: dict) -> dict:
+    """
+    Validates and normalises a user-submitted client profile.
+    Raises ProfileValidationError with a human-readable message on failure.
+    Returns the profile with missing optional sub-keys filled in as empty
+    lists/dicts so downstream code never has to guard against KeyError.
+    """
+    if not isinstance(profile, dict):
+        raise ProfileValidationError("Client profile must be a JSON object.")
+
+    missing = REQUIRED_TOP_LEVEL_KEYS - set(profile.keys())
+    if missing:
+        raise ProfileValidationError(
+            f"Client profile is missing required field(s): {', '.join(sorted(missing))}"
+        )
+
+    if not profile["client_id"] or not isinstance(profile["client_id"], str):
+        raise ProfileValidationError("client_id must be a non-empty string.")
+
+    # tier1_suppliers: list of {name, provides, location}
+    suppliers = profile.get("tier1_suppliers") or []
+    if not isinstance(suppliers, list):
+        raise ProfileValidationError("tier1_suppliers must be a list.")
+    for i, s in enumerate(suppliers):
+        if not isinstance(s, dict) or not s.get("name") or not s.get("location"):
+            raise ProfileValidationError(
+                f"tier1_suppliers[{i}] must include at least 'name' and 'location'."
             )
-            for entity_type, entity_name, location, context in tasks
-        }
+        s.setdefault("provides", "")
 
-        for future in as_completed(futures):
-            entity_type, entity_name, location, context = futures[future]
-            try:
-                query_obj = future.result()
-            except Exception as e:
-                # Fallback on API failure
-                query_obj = {
-                    "entity_type": entity_type,
-                    "entity_name": entity_name,
-                    "location": location,
-                    "bigquery_keywords": f"{entity_name} {location} disruption shortage delay".strip(),
-                    "doc_api_query": f"{entity_name} {location} disruption".strip(),
-                    "error": str(e),
-                }
+    # raw_materials: list of {commodity, origin_regions: [..]}
+    materials = profile.get("raw_materials") or []
+    if not isinstance(materials, list):
+        raise ProfileValidationError("raw_materials must be a list.")
+    for i, m in enumerate(materials):
+        if not isinstance(m, dict) or not m.get("commodity"):
+            raise ProfileValidationError(
+                f"raw_materials[{i}] must include 'commodity'."
+            )
+        m.setdefault("origin_regions", [])
+        if not isinstance(m["origin_regions"], list):
+            raise ProfileValidationError(
+                f"raw_materials[{i}].origin_regions must be a list."
+            )
 
-            query_obj["search_route"] = ENTITY_TYPE_ROUTING.get(entity_type, "doc_api")
-            results.append(query_obj)
+    # logistics: {ports: [..], carriers: [..]}
+    logistics = profile.get("logistics") or {}
+    if not isinstance(logistics, dict):
+        raise ProfileValidationError("logistics must be an object.")
+    logistics.setdefault("ports", [])
+    logistics.setdefault("carriers", [])
+    if not isinstance(logistics["ports"], list) or not isinstance(logistics["carriers"], list):
+        raise ProfileValidationError("logistics.ports and logistics.carriers must be lists.")
+    profile["logistics"] = logistics
 
-    return results
+    # own_facilities: list of {location, type}
+    facilities = profile.get("own_facilities") or []
+    if not isinstance(facilities, list):
+        raise ProfileValidationError("own_facilities must be a list.")
+    for i, f in enumerate(facilities):
+        if not isinstance(f, dict) or not f.get("location"):
+            raise ProfileValidationError(
+                f"own_facilities[{i}] must include 'location'."
+            )
+        f.setdefault("type", "")
+
+    # At least one entity overall, or there is nothing to search for.
+    if not (suppliers or materials or logistics["ports"] or logistics["carriers"] or facilities):
+        raise ProfileValidationError(
+            "Client profile has no suppliers, materials, logistics nodes, or facilities. "
+            "At least one entity is required to generate search queries."
+        )
+
+    return profile
 
 
-if __name__ == "__main__":
-    # Example: load a profile from SQLite and generate queries for it
-    from db import get_client_profile
+# ==========================================================================
+# QUERY GENERATION
+#   Identical prong logic to the trial script, but `profile` is now
+#   whatever the user submitted (validated first).
+# ==========================================================================
+def generate_queries(profile: dict, domain_filter: bool = True) -> list:
+    """
+    Returns a list of dicts: {type, anchor, where}
+    where `where` is a SQL boolean expression (without the word WHERE).
 
-    profile = get_client_profile(client_id=1)
-    if profile is None:
-        print("No client profile found. Save one via db.save_client_profile() first.")
-    else:
-        queries = generate_queries_for_profile(profile)
-        print(json.dumps(queries, indent=2))
+    domain_filter=True  (default, production): appends
+        AND SourceCommonName IN (...) to every query — trusted outlets only.
+    domain_filter=False (discover/dev only): no domain constraint in SQL;
+        BigQuery returns all matching articles regardless of outlet.
+    """
+    queries = []
+    dom = _domains_in_clause() if domain_filter else None
+
+    def _and_dom():
+        return f"AND {dom}" if dom else ""
+
+    # --- PRONG 1: entity (Tier-1 suppliers) --------------------------------
+    for s in profile.get("tier1_suppliers", []):
+        name = _sql_escape(s["name"].lower())
+        where = (
+            f"(LOWER(V2Organizations) LIKE '%{name}%' "
+            f"OR LOWER(DocumentIdentifier) LIKE '%{name}%') "
+            f"{_and_dom()}"
+        )
+        queries.append({"type": "entity", "anchor": s["name"], "where": where})
+
+    # --- PRONG 2: geographic (supplier + facility + port locations) -------
+    locations = [s["location"] for s in profile.get("tier1_suppliers", [])]
+    locations += [f["location"] for f in profile.get("own_facilities", [])]
+    locations += profile.get("logistics", {}).get("ports", [])
+    for loc in locations:
+        loc_esc = _sql_escape(loc.lower())
+        theme_clause = _theme_or_clause(ALL_THEME_CODES)
+        where = (
+            f"LOWER(V2Locations) LIKE '%{loc_esc}%' "
+            f"AND {theme_clause} "
+            f"{_and_dom()}"
+        )
+        queries.append({"type": "geo", "anchor": loc, "where": where})
+
+    # --- PRONG 3: commodity (raw materials + their origin regions) --------
+    commodity_themes = DOMAIN_THEMES["energy"] + DOMAIN_THEMES["commodity"]
+    for m in profile.get("raw_materials", []):
+        commodity = _sql_escape(m["commodity"].lower())
+        theme_clause = _theme_or_clause(commodity_themes)
+        where = (
+            f"(LOWER(DocumentIdentifier) LIKE '%{commodity}%' "
+            f"OR LOWER(V2Organizations) LIKE '%{commodity}%') "
+            f"AND {theme_clause} "
+            f"{_and_dom()}"
+        )
+        queries.append({"type": "commodity", "anchor": m["commodity"], "where": where})
+
+        for region in m.get("origin_regions", []):
+            region_esc = _sql_escape(region.lower())
+            where_r = (
+                f"LOWER(V2Locations) LIKE '%{region_esc}%' "
+                f"AND (LOWER(DocumentIdentifier) LIKE '%{commodity}%' "
+                f"     OR LOWER(V2Organizations) LIKE '%{commodity}%') "
+                f"AND {theme_clause} "
+                f"{_and_dom()}"
+            )
+            queries.append({
+                "type": "commodity_origin",
+                "anchor": f"{region}/{m['commodity']}",
+                "where": where_r,
+            })
+
+    # --- PRONG 4: carrier (logistics carriers) -----------------------------
+    carrier_themes = DOMAIN_THEMES["logistics"] + DOMAIN_THEMES["conflict"]
+    for carrier in profile.get("logistics", {}).get("carriers", []):
+        carrier_esc = _sql_escape(carrier.lower())
+        theme_clause = _theme_or_clause(carrier_themes)
+        where = (
+            f"(LOWER(V2Organizations) LIKE '%{carrier_esc}%' "
+            f"OR LOWER(DocumentIdentifier) LIKE '%{carrier_esc}%') "
+            f"AND {theme_clause} "
+            f"{_and_dom()}"
+        )
+        queries.append({"type": "carrier", "anchor": carrier, "where": where})
+
+    return queries
+
+
+def audit_coverage(profile: dict) -> dict:
+    """Returns theme-code counts per disruption domain (for diagnostics/UI)."""
+    return {d: len(codes) for d, codes in DOMAIN_THEMES.items()}

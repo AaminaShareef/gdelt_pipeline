@@ -4,227 +4,109 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SCDI — Supply Chain Disruption Intelligence</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
 <body>
 
-  <!-- ── HEADER ─────────────────────────────────────────────── -->
-  <header class="site-header">
-    <div class="header-inner">
-      <div class="logo">
-        <span class="logo-mark">◈</span>
-        <span class="logo-text">SCDI</span>
-        <span class="logo-sub">Supply Chain Disruption Intelligence</span>
-      </div>
-      <div class="pipeline-stages">
-        <span class="stage-dot active" data-stage="1" title="Stage 1 — Query Generation">1</span>
-        <span class="stage-connector"></span>
-        <span class="stage-dot" data-stage="2" title="Stage 2 — GDELT Fetch">2</span>
-        <span class="stage-connector"></span>
-        <span class="stage-dot" data-stage="3" title="Stage 3 — Pre-Filter">3</span>
-        <span class="stage-connector"></span>
-        <span class="stage-dot" data-stage="4" title="Stage 4 — Deep Scoring">4</span>
-        <span class="stage-connector"></span>
-        <span class="stage-dot" data-stage="5" title="Stage 5 — Deduplication">5</span>
-        <span class="stage-connector"></span>
-        <span class="stage-dot" data-stage="6" title="Stage 6 — Dashboard">6</span>
-      </div>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand">SCDI</span>
+      <span class="brand-sub">Supply Chain Disruption Intelligence</span>
     </div>
   </header>
 
-  <!-- ── MAIN LAYOUT ────────────────────────────────────────── -->
-  <main class="app-layout">
+  <main class="layout">
 
-    <!-- LEFT PANEL: Client profiles list -->
-    <aside class="panel panel-clients">
-      <div class="panel-header">
-        <h2>Client Profiles</h2>
-        <button class="btn-icon" id="btn-new-profile" title="New profile">+</button>
-      </div>
-      <div class="client-list" id="client-list">
-        <p class="empty-state">No profiles yet. Create one →</p>
-      </div>
-    </aside>
+    <!-- ===================== LEFT: CLIENT PROFILE FORM ===================== -->
+    <section class="panel profile-panel">
+      <h2>Client Profile</h2>
+      <p class="hint">Enter the client's supply chain. Each section maps to one of the four entity types the pipeline searches for.</p>
 
-    <!-- CENTRE PANEL: Profile intake form -->
-    <section class="panel panel-form" id="panel-form">
-      <div class="panel-header">
-        <h2 id="form-title">New Client Profile</h2>
-        <div class="form-actions-top">
-          <button class="btn btn-ghost" id="btn-cancel" style="display:none">Cancel</button>
-          <button class="btn btn-primary" id="btn-save-profile">Save Profile</button>
+      <form id="profile-form">
+
+        <div class="field">
+          <label for="client_id">Client ID</label>
+          <input type="text" id="client_id" name="client_id" placeholder="e.g. brightarc_electronics" required />
+        </div>
+
+        <!-- TIER-1 SUPPLIERS -->
+        <fieldset>
+          <legend>Tier-1 Suppliers</legend>
+          <div id="suppliers-list"></div>
+          <button type="button" class="btn-add" data-add="supplier">+ Add supplier</button>
+        </fieldset>
+
+        <!-- RAW MATERIALS -->
+        <fieldset>
+          <legend>Raw Materials</legend>
+          <div id="materials-list"></div>
+          <button type="button" class="btn-add" data-add="material">+ Add material</button>
+        </fieldset>
+
+        <!-- LOGISTICS -->
+        <fieldset>
+          <legend>Logistics Nodes</legend>
+
+          <div class="sub-label">Ports</div>
+          <div id="ports-list"></div>
+          <button type="button" class="btn-add" data-add="port">+ Add port</button>
+
+          <div class="sub-label">Carriers</div>
+          <div id="carriers-list"></div>
+          <button type="button" class="btn-add" data-add="carrier">+ Add carrier</button>
+        </fieldset>
+
+        <!-- OWN FACILITIES -->
+        <fieldset>
+          <legend>Own Facilities</legend>
+          <div id="facilities-list"></div>
+          <button type="button" class="btn-add" data-add="facility">+ Add facility</button>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Save profile</button>
+        </div>
+      </form>
+
+      <div id="profile-status" class="status-msg" role="status"></div>
+
+      <hr />
+
+      <h3>Saved Profiles</h3>
+      <div id="saved-profiles-list" class="saved-list"></div>
+    </section>
+
+    <!-- ===================== RIGHT: DASHBOARD ===================== -->
+    <section class="panel dashboard-panel">
+      <div class="dashboard-header">
+        <h2>Dashboard</h2>
+        <div class="run-controls">
+          <select id="active-client-select">
+            <option value="">Select a client…</option>
+          </select>
+          <button id="run-pipeline-btn" class="btn-primary" disabled>Run analysis</button>
         </div>
       </div>
 
-      <div class="form-body">
-        <div class="field-group">
-          <label for="client-name">Client Name</label>
-          <input type="text" id="client-name" placeholder="e.g. BrightArc Electronics Ltd." autocomplete="off" />
-        </div>
+      <div id="run-log" class="run-log" aria-live="polite"></div>
 
-        <!-- Suppliers -->
-        <div class="section-block">
-          <div class="section-block-header">
-            <span class="section-tag tag-supplier">Supplier</span>
-            <h3>Tier-1 Suppliers</h3>
-            <button class="btn-add" data-section="suppliers">+ Add</button>
-          </div>
-          <div class="rows-container" id="suppliers-rows"></div>
-        </div>
+      <div id="dashboard-empty" class="empty-state">
+        Select a client and click <strong>Run analysis</strong> to fetch and score disruption news for their supply chain.
+      </div>
 
-        <!-- Materials -->
-        <div class="section-block">
-          <div class="section-block-header">
-            <span class="section-tag tag-material">Material</span>
-            <h3>Raw Materials</h3>
-            <button class="btn-add" data-section="materials">+ Add</button>
-          </div>
-          <div class="rows-container" id="materials-rows"></div>
-        </div>
+      <div id="dashboard-content" class="dashboard-content" hidden>
+        <div class="summary-row" id="summary-row"></div>
 
-        <!-- Logistics -->
-        <div class="section-block">
-          <div class="section-block-header">
-            <span class="section-tag tag-logistics">Logistics</span>
-            <h3>Logistics Nodes</h3>
-            <button class="btn-add" data-section="logistics_nodes">+ Add</button>
-          </div>
-          <div class="rows-container" id="logistics_nodes-rows"></div>
-        </div>
+        <h3>Entity Status</h3>
+        <div id="entity-grid" class="entity-grid"></div>
 
-        <!-- Facilities -->
-        <div class="section-block">
-          <div class="section-block-header">
-            <span class="section-tag tag-facility">Facility</span>
-            <h3>Own Facilities</h3>
-            <button class="btn-add" data-section="facilities">+ Add</button>
-          </div>
-          <div class="rows-container" id="facilities-rows"></div>
-        </div>
+        <h3>Articles</h3>
+        <div id="article-list" class="article-list"></div>
       </div>
     </section>
 
-    <!-- RIGHT PANEL: Pipeline runner + results -->
-    <section class="panel panel-pipeline" id="panel-pipeline">
-      <div class="panel-header">
-        <h2>Pipeline</h2>
-        <span class="client-badge" id="pipeline-client-label">— no client selected —</span>
-      </div>
-
-      <!-- Stage controls -->
-      <div class="stage-card" id="stage-1-card">
-        <div class="stage-card-header">
-          <span class="stage-num">01</span>
-          <div>
-            <div class="stage-name">Query Generation</div>
-            <div class="stage-model">Llama 3.3 70B · OpenRouter</div>
-          </div>
-          <button class="btn btn-run" id="btn-run-queries" disabled>Run</button>
-        </div>
-        <div class="stage-output" id="stage-1-output"></div>
-      </div>
-
-      <div class="stage-card" id="stage-2-card">
-        <div class="stage-card-header">
-          <span class="stage-num">02</span>
-          <div>
-            <div class="stage-name">GDELT Fetch</div>
-            <div class="stage-model">BigQuery GKG · DOC 2.0 API</div>
-          </div>
-          <button class="btn btn-run" id="btn-run-fetch" disabled>Run</button>
-        </div>
-        <div class="stage-output" id="stage-2-output"></div>
-      </div>
-
-      <div class="stage-card stage-coming" id="stage-3-card">
-        <div class="stage-card-header">
-          <span class="stage-num">03</span>
-          <div>
-            <div class="stage-name">Metadata Pre-Filter</div>
-            <div class="stage-model">Llama 3.2 3B · OpenRouter</div>
-          </div>
-          <span class="badge-soon">Coming</span>
-        </div>
-      </div>
-
-      <div class="stage-card stage-coming" id="stage-4-card">
-        <div class="stage-card-header">
-          <span class="stage-num">04</span>
-          <div>
-            <div class="stage-name">Deep Scoring</div>
-            <div class="stage-model">Nemotron 3 Super 120B · OpenRouter</div>
-          </div>
-          <span class="badge-soon">Coming</span>
-        </div>
-      </div>
-
-      <div class="stage-card stage-coming">
-        <div class="stage-card-header">
-          <span class="stage-num">05</span>
-          <div>
-            <div class="stage-name">Smart Deduplication</div>
-            <div class="stage-model">Nemotron 3 Super 120B · OpenRouter</div>
-          </div>
-          <span class="badge-soon">Coming</span>
-        </div>
-      </div>
-
-      <div class="stage-card stage-coming">
-        <div class="stage-card-header">
-          <span class="stage-num">06</span>
-          <div>
-            <div class="stage-name">Dashboard & Briefings</div>
-            <div class="stage-model">Nemotron 3 Super 120B · OpenRouter</div>
-          </div>
-          <span class="badge-soon">Coming</span>
-        </div>
-      </div>
-
-    </section>
   </main>
 
-  <!-- ── TOAST ──────────────────────────────────────────────── -->
-  <div class="toast" id="toast"></div>
-
-  <!-- ── ROW TEMPLATES (hidden) ─────────────────────────────── -->
-  <template id="tpl-supplier">
-    <div class="entity-row">
-      <input type="text" placeholder="Supplier name" data-field="name" />
-      <input type="text" placeholder="Supplies (e.g. Microchips)" data-field="supplies" />
-      <input type="text" placeholder="Location" data-field="location" />
-      <button class="btn-remove" title="Remove">×</button>
-    </div>
-  </template>
-
-  <template id="tpl-material">
-    <div class="entity-row">
-      <input type="text" placeholder="Material / commodity" data-field="name" />
-      <input type="text" placeholder="Sourced from" data-field="sourced_from" />
-      <button class="btn-remove" title="Remove">×</button>
-    </div>
-  </template>
-
-  <template id="tpl-logistics_nodes">
-    <div class="entity-row">
-      <input type="text" placeholder="Node name (e.g. Port of Busan)" data-field="name" />
-      <input type="text" placeholder="Type (port / carrier / hub)" data-field="type" />
-      <input type="text" placeholder="Role in supply chain" data-field="role" />
-      <input type="text" placeholder="Location" data-field="location" />
-      <button class="btn-remove" title="Remove">×</button>
-    </div>
-  </template>
-
-  <template id="tpl-facility">
-    <div class="entity-row">
-      <input type="text" placeholder="Facility name" data-field="name" />
-      <input type="text" placeholder="Location" data-field="location" />
-      <button class="btn-remove" title="Remove">×</button>
-    </div>
-  </template>
-
-  <script src="/static/js/script.js"></script>
+  <script src="{{ url_for('static', filename='js/script.js') }}"></script>
 </body>
 </html>

@@ -1,193 +1,161 @@
 """
-SCDI Pipeline — Flask app entry point.
+app.py
+======
+Flask entry point. Serves the client profile form, accepts a user-submitted
+profile (instead of a hardcoded one), runs the GDELT BigQuery + scrape
+pipeline against it, persists results, and returns them to the frontend.
 
-Serves the client profile intake UI (templates/index.html, static/css,
-static/js) and exposes a JSON API for client profile CRUD (backed by
-db.py / SQLite) plus Stage 1 query generation (query_generator.py).
-
-Run:
-    python app.py
-
-Environment:
-    OPENROUTER_API_KEY   required by query_generator.py for Stage 1 calls
-    SCDI_DB_PATH         optional, defaults to scdi.db (see db.py)
-    FLASK_DEBUG          optional, "1" to enable debug/reload
+Auth note: BigQuery access uses Application Default Credentials from the
+gcloud CLI (`gcloud auth application-default login`). No service-account
+key file is read here.
 """
 
 import os
-from flask import Flask, jsonify, request, render_template
+import traceback
+
+from flask import Flask, jsonify, render_template, request
+from dotenv import load_dotenv
 
 import db
-import query_generator
-import gdelt_fetch
+from query_generator import validate_profile, ProfileValidationError
+from gdelt_fetch import run_pipeline
+
+load_dotenv()
 
 app = Flask(__name__)
 
+# Developer-only switch. Never exposed in the UI / API request body.
+# Set DISCOVER_MODE=true in .env temporarily when onboarding a brand-new
+# client whose relevant news domains aren't in TRUSTED_DOMAINS yet.
+DISCOVER_MODE = os.environ.get("DISCOVER_MODE", "false").lower() == "true"
 
-# ---------------------------------------------------------------------------
-# Frontend
-# ---------------------------------------------------------------------------
+db.init_db()
 
+
+# ==========================================================================
+# PAGES
+# ==========================================================================
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-# ---------------------------------------------------------------------------
-# Client profile API
-# ---------------------------------------------------------------------------
-
-@app.route("/api/clients", methods=["GET"])
-def api_list_clients():
-    """List all saved client profiles: [{id, client_name, updated_at}, ...]"""
-    return jsonify(db.list_clients())
+# ==========================================================================
+# CLIENT PROFILE API
+# ==========================================================================
+@app.route("/api/profiles", methods=["GET"])
+def api_list_profiles():
+    return jsonify(db.list_profiles())
 
 
-@app.route("/api/clients/<int:client_id>", methods=["GET"])
-def api_get_client(client_id):
-    """Get one client's full record: {id, client_name, profile, updated_at}"""
-    record = db.get_client(client_id)
-    if record is None:
-        return jsonify({"error": "Client not found"}), 404
-    return jsonify(record)
-
-
-@app.route("/api/clients", methods=["POST"])
-def api_create_client():
-    """Create a new client profile from posted JSON profile."""
-    profile = request.get_json(silent=True)
-    if not profile:
-        return jsonify({"error": "Request body must be a JSON client profile"}), 400
-
-    record = db.upsert_client(profile)
-    db.export_profile_json(record["profile"], record["id"])
-    return jsonify(record), 201
-
-
-@app.route("/api/clients/<int:client_id>", methods=["PUT"])
-def api_update_client(client_id):
-    """Overwrite an existing client profile with posted JSON profile."""
-    profile = request.get_json(silent=True)
-    if not profile:
-        return jsonify({"error": "Request body must be a JSON client profile"}), 400
-
-    if db.get_client_profile(client_id) is None:
-        return jsonify({"error": "Client not found"}), 404
-
-    record = db.upsert_client(profile, client_id=client_id)
-    db.export_profile_json(record["profile"], record["id"])
-    return jsonify(record)
-
-
-@app.route("/api/clients/<int:client_id>", methods=["DELETE"])
-def api_delete_client(client_id):
-    """Delete a client profile."""
-    deleted = db.delete_client_profile(client_id)
-    if not deleted:
-        return jsonify({"error": "Client not found"}), 404
-    return jsonify({"deleted": True})
-
-
-# ---------------------------------------------------------------------------
-# Stage 1 — Query Generation
-# ---------------------------------------------------------------------------
-
-@app.route("/api/clients/<int:client_id>/queries", methods=["POST"])
-def api_generate_queries(client_id):
-    """
-    Run Stage 1 (Llama 3.3 70B via OpenRouter) for a saved client profile,
-    returning one GDELT query object per entity (supplier, material,
-    logistics node, facility).
-    """
-    profile = db.get_client_profile(client_id)
+@app.route("/api/profiles/<client_id>", methods=["GET"])
+def api_get_profile(client_id):
+    profile = db.get_profile(client_id)
     if profile is None:
-        return jsonify({"error": "Client not found"}), 404
+        return jsonify({"error": "Client profile not found."}), 404
+    return jsonify(profile)
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        return jsonify({"error": "OPENROUTER_API_KEY is not set on the server"}), 500
+
+@app.route("/api/profiles", methods=["POST"])
+def api_create_profile():
+    """
+    Accepts a client profile submitted by the user (via form or JSON body)
+    in place of the old hardcoded CLIENT_PROFILE. Validates it, then saves
+    it. Does NOT run the pipeline — that's a separate explicit step so a
+    user can review/edit a profile before spending BigQuery + scrape time.
+    """
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"error": "Request body must be valid JSON."}), 400
 
     try:
-        queries = query_generator.generate_queries_for_profile(profile)
-    except Exception as e:
-        return jsonify({"error": f"Query generation failed: {e}"}), 500
+        profile = validate_profile(payload)
+    except ProfileValidationError as e:
+        return jsonify({"error": str(e)}), 400
 
-    return jsonify({"client_id": client_id, "queries": queries})
+    db.save_profile(profile)
+    return jsonify({"status": "saved", "client_id": profile["client_id"]}), 201
 
 
-# ---------------------------------------------------------------------------
-# Stage 2 — GDELT Fetch
-# ---------------------------------------------------------------------------
+@app.route("/api/profiles/<client_id>", methods=["DELETE"])
+def api_delete_profile(client_id):
+    db.delete_profile(client_id)
+    return jsonify({"status": "deleted", "client_id": client_id})
 
-@app.route("/api/clients/<int:client_id>/fetch", methods=["POST"])
-def api_fetch_articles(client_id):
+
+# ==========================================================================
+# PIPELINE EXECUTION API
+# ==========================================================================
+@app.route("/api/run/<client_id>", methods=["POST"])
+def api_run_pipeline(client_id):
     """
-    Run Stage 2 (GDELT fetch) for a saved client profile.
-
-    Expects a JSON body with previously generated queries:
-      { "queries": [ ...query objects from Stage 1... ] }
-
-    Or pass regenerate=true to re-run Stage 1 first:
-      { "regenerate": true }
-
-    Returns { client_id, article_count, articles: [...] }
-    and persists results to data/runs/client_<id>/stage2_articles.json.
+    Runs the GDELT BigQuery fetch + scrape pipeline for an already-saved
+    client profile. This replaces the trial script's
+    `run_trial(CLIENT_PROFILE, ...)` call at the bottom of the old script —
+    the profile now comes from the database (i.e. from whatever the user
+    submitted), not from a hardcoded constant.
     """
-    profile = db.get_client_profile(client_id)
+    profile = db.get_profile(client_id)
     if profile is None:
-        return jsonify({"error": "Client not found"}), 404
+        return jsonify({"error": f"No saved profile for client_id '{client_id}'."}), 404
 
     body = request.get_json(silent=True) or {}
-    queries = body.get("queries")
+    days_back = int(body.get("days_back", 7))
+    articles_per_query = int(body.get("articles_per_query", 15))
+    max_queries = body.get("max_queries")  # None = no cap
+    max_tokens = int(body.get("max_tokens", 500))
+    polite_delay = float(body.get("polite_delay", 2.5))
 
-    # If no queries provided, try to regenerate from profile (requires OPENROUTER_API_KEY)
-    if not queries:
-        if not os.environ.get("OPENROUTER_API_KEY"):
-            return jsonify({
-                "error": "Provide 'queries' in the request body, or set OPENROUTER_API_KEY to auto-generate them."
-            }), 400
-        try:
-            queries = query_generator.generate_queries_for_profile(profile)
-        except Exception as e:
-            return jsonify({"error": f"Query generation failed: {e}"}), 500
+    log_lines = []
+
+    def progress(msg):
+        log_lines.append(msg)
 
     try:
-        articles = gdelt_fetch.fetch_articles_for_queries(queries)
-        save_path = gdelt_fetch.save_fetch_results(articles, client_id)
+        run_result = run_pipeline(
+            profile,
+            days_back=days_back,
+            articles_per_query=articles_per_query,
+            max_queries=max_queries,
+            max_tokens=max_tokens,
+            polite_delay=polite_delay,
+            discover_mode=DISCOVER_MODE,   # dev-only env flag, never user input
+            progress_callback=progress,
+        )
+    except RuntimeError as e:
+        # e.g. GOOGLE_CLOUD_PROJECT not set
+        return jsonify({"error": str(e)}), 500
     except Exception as e:
-        return jsonify({"error": f"GDELT fetch failed: {e}"}), 500
+        traceback.print_exc()
+        return jsonify({"error": "Pipeline run failed.", "detail": str(e)}), 500
 
-    return jsonify({
-        "client_id": client_id,
-        "article_count": len(articles),
-        "saved_to": save_path,
-        "articles": articles,
-    })
+    run_id = db.save_run(client_id, run_result)
+    run_result["run_id"] = run_id
+    run_result["log"] = log_lines
 
-
-@app.route("/api/clients/<int:client_id>/fetch", methods=["GET"])
-def api_get_fetched_articles(client_id):
-    """Return previously saved Stage 2 results for a client."""
-    if db.get_client_profile(client_id) is None:
-        return jsonify({"error": "Client not found"}), 404
-
-    articles = gdelt_fetch.load_fetch_results(client_id)
-    return jsonify({
-        "client_id": client_id,
-        "article_count": len(articles),
-        "articles": articles,
-    })
+    return jsonify(run_result)
 
 
-# ---------------------------------------------------------------------------
-# Health check
-# ---------------------------------------------------------------------------
+@app.route("/api/runs/<client_id>", methods=["GET"])
+def api_list_runs(client_id):
+    return jsonify(db.list_runs(client_id))
 
-@app.route("/api/health", methods=["GET"])
-def api_health():
-    return jsonify({"status": "ok"})
+
+@app.route("/api/runs/<int:run_id>/detail", methods=["GET"])
+def api_get_run(run_id):
+    run = db.get_run(run_id)
+    if run is None:
+        return jsonify({"error": "Run not found."}), 404
+    return jsonify(run)
+
+
+@app.route("/api/runs/<client_id>/latest", methods=["GET"])
+def api_latest_run(client_id):
+    run = db.latest_run_for_client(client_id)
+    if run is None:
+        return jsonify({"error": "No runs found for this client yet."}), 404
+    return jsonify(run)
 
 
 if __name__ == "__main__":
-    db.init_db()
-    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(host="0.0.0.0", port=5000, debug=debug)
+    app.run(debug=True, port=5000)

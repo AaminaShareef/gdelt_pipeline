@@ -1,0 +1,65 @@
+{
+  "client_id": "nova_mobile_inc",
+  "tier1_suppliers": [
+    {
+      "name": "TSMC",
+      "provides": "Smartphone processors (chips)",
+      "location": "Hsinchu, Taiwan"
+    },
+    {
+      "name": "Foxconn",
+      "provides": "Device assembly",
+      "location": "Shenzhen, China"
+    },
+    {
+      "name": "Samsung Display",
+      "provides": "OLED displays",
+      "location": "Asan, South Korea"
+    }
+  ],
+  "raw_materials": [
+    {
+      "commodity": "Lithium",
+      "origin_regions": [
+        "Atacama",
+        "Chile"
+      ]
+    },
+    {
+      "commodity": "Rare Earth Elements",
+      "origin_regions": [
+        "Inner Mongolia",
+        "China"
+      ]
+    },
+    {
+      "commodity": "Copper",
+      "origin_regions": [
+        "Zambia",
+        "Democratic Republic of Congo"
+      ]
+    }
+  ],
+  "logistics": {
+    "ports": [
+      "Port of Kaohsiung",
+      "Port of Shenzhen",
+      "Port of Busan"
+    ],
+    "carriers": [
+      "Maersk Line",
+      "MSC",
+      "CMA CGM"
+    ]
+  },
+  "own_facilities": [
+    {
+      "location": "Chennai, India",
+      "type": "Assembly Plant"
+    },
+    {
+      "location": "Rotterdam, Netherlands",
+      "type": "Distribution Hub"
+    }
+  ]
+}
