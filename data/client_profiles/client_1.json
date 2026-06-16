@@ -1,0 +1,30 @@
+{
+  "client_name": "tesla",
+  "suppliers": [
+    {
+      "name": "a",
+      "supplies": "a",
+      "location": "a"
+    }
+  ],
+  "materials": [
+    {
+      "name": "b",
+      "sourced_from": "b"
+    }
+  ],
+  "logistics_nodes": [
+    {
+      "name": "bc",
+      "type": "bc",
+      "role": "bc",
+      "location": "bc"
+    }
+  ],
+  "facilities": [
+    {
+      "name": "d",
+      "location": "d"
+    }
+  ]
+}
