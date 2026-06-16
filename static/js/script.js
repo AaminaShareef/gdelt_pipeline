@@ -249,14 +249,16 @@ runBtn.addEventListener("click", async () => {
 function renderDashboard(run) {
   document.getElementById("dashboard-content").hidden = false;
 
-  // --- summary cards ---
+  // --- summary cards (top-level pipeline numbers) ---
   const summaryRow = document.getElementById("summary-row");
   summaryRow.innerHTML = "";
+  const briefingCount = (run.briefings || []).length;
+  const disruptionCount = (run.deep_score || {}).n_disruptions || 0;
   const cards = [
-    { label: "BigQuery rows", value: run.n_rows },
-    { label: "Articles scraped", value: run.n_scraped_ok },
-    { label: "Data scanned", value: (run.bytes_scanned / 1e9).toFixed(3) + " GB" },
-    { label: "Queries run", value: run.n_queries },
+    { label: "Disruption briefs", value: briefingCount },
+    { label: "Confirmed disruptions", value: disruptionCount },
+    { label: "Articles scraped", value: run.n_scraped_ok || 0 },
+    { label: "Queries run", value: run.n_queries || 0 },
   ];
   cards.forEach((c) => {
     const card = document.createElement("div");
@@ -265,14 +267,88 @@ function renderDashboard(run) {
     summaryRow.appendChild(card);
   });
 
-  // --- entity grid (group articles by anchor) ---
+  // --- pipeline funnel stats bar ---
+  const statsEl = document.getElementById("pipeline-stats");
+  statsEl.innerHTML = "";
+  const pf = run.prefilter || {};
+  const ds = run.deep_score || {};
+  const dd = run.dedup || {};
+  const steps = [
+    { num: run.n_rows || 0,       label: "GDELT rows" },
+    { num: run.n_scraped_ok || 0, label: "scraped" },
+    { num: pf.n_passed || 0,      label: "pre-filter passed" },
+    { num: ds.n_disruptions || 0, label: "deep-scored disruptions" },
+    { num: dd.n_kept || 0,        label: "after dedup" },
+    { num: briefingCount,          label: "briefings" },
+  ];
+  steps.forEach((s, i) => {
+    const step = document.createElement("span");
+    step.className = "stat-step";
+    step.innerHTML = `<span class="stat-num">${s.num}</span> ${s.label}`;
+    statsEl.appendChild(step);
+    if (i < steps.length - 1) {
+      const arr = document.createElement("span");
+      arr.className = "stat-arrow";
+      arr.textContent = "›";
+      statsEl.appendChild(arr);
+    }
+  });
+
+  // --- briefings ---
+  const briefingsList = document.getElementById("briefings-list");
+  briefingsList.innerHTML = "";
+  const briefings = run.briefings || [];
+  if (briefings.length === 0) {
+    briefingsList.innerHTML = '<div class="briefing-empty">No disruptions detected for this client in the selected time window.</div>';
+  } else {
+    briefings.forEach((b) => {
+      const sev = b.severity || "LOW";
+      const card = document.createElement("div");
+      card.className = `briefing-card sev-${sev}`;
+
+      const sourceLinks = (b.sources || [])
+        .map((s) => `<a href="${s.url}" target="_blank" rel="noopener noreferrer">${s.domain} (${s.gkg_date})</a>`)
+        .join(" ");
+
+      card.innerHTML = `
+        <div class="briefing-top">
+          <span class="sev-badge sev-${sev}">${sev}</span>
+          <span class="briefing-headline">${b.headline || ""}</span>
+        </div>
+        <div class="briefing-body">${b.brief || ""}</div>
+        ${sourceLinks ? `<div class="briefing-sources">Sources: ${sourceLinks}</div>` : ""}
+      `;
+      briefingsList.appendChild(card);
+    });
+  }
+
+  // --- entity grid: status driven by deep scoring, not raw scrape count ---
   const entityGrid = document.getElementById("entity-grid");
   entityGrid.innerHTML = "";
 
+  // Build a map: anchor → highest severity seen across scored disruptions
+  const anchorSeverity = {};  // anchor → "HIGH"|"MEDIUM"|"LOW"|null
+  const anchorDisruptionCount = {};
+  (run.scored_articles || []).forEach((a) => {
+    const anchor = a.anchor;
+    const ext = a.extraction || {};
+    if (!anchorSeverity[anchor]) anchorSeverity[anchor] = null;
+    if (ext.is_disruption) {
+      anchorDisruptionCount[anchor] = (anchorDisruptionCount[anchor] || 0) + 1;
+      const sev = ext.severity;
+      const order = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+      if (!anchorSeverity[anchor] || (order[sev] || 0) > (order[anchorSeverity[anchor]] || 0)) {
+        anchorSeverity[anchor] = sev;
+      }
+    }
+  });
+
+  // Collect all anchors from raw results (includes those with 0 disruptions)
   const byAnchor = {};
   (run.results || []).forEach((r) => {
-    if (!byAnchor[r.anchor]) byAnchor[r.anchor] = [];
-    byAnchor[r.anchor].push(r);
+    if (!byAnchor[r.anchor]) byAnchor[r.anchor] = { type: r.query_type, total: 0, scraped: 0 };
+    byAnchor[r.anchor].total++;
+    if (r.scrape_ok) byAnchor[r.anchor].scraped++;
   });
 
   const allAnchors = Object.keys(byAnchor);
@@ -281,43 +357,74 @@ function renderDashboard(run) {
   }
 
   allAnchors.forEach((anchor) => {
-    const articles = byAnchor[anchor];
-    const okCount = articles.filter((a) => a.scrape_ok).length;
-    let status = "clear";
-    if (okCount >= 3) status = "high";
-    else if (okCount >= 1) status = "medium";
+    const info = byAnchor[anchor];
+    const topSev = anchorSeverity[anchor];  // null if no disruptions scored
+    const dCount = anchorDisruptionCount[anchor] || 0;
+
+    let statusClass, badgeClass, badgeLabel;
+    if (topSev === "HIGH") {
+      statusClass = "status-high"; badgeClass = "status-high"; badgeLabel = "HIGH";
+    } else if (topSev === "MEDIUM") {
+      statusClass = "status-medium"; badgeClass = "status-medium"; badgeLabel = "MEDIUM";
+    } else if (topSev === "LOW") {
+      statusClass = "status-medium"; badgeClass = "status-medium"; badgeLabel = "LOW";
+    } else {
+      statusClass = "status-clear"; badgeClass = "status-clear"; badgeLabel = "Clear";
+    }
 
     const card = document.createElement("div");
-    card.className = `entity-card status-${status}`;
+    card.className = `entity-card ${statusClass}`;
     card.innerHTML = `
       <div class="entity-name">${anchor}</div>
-      <div class="entity-meta">${articles[0].query_type} · ${articles.length} article(s)</div>
-      <span class="badge status-${status}">${status === "clear" ? "Clear" : status === "medium" ? "Medium" : "High"}</span>
+      <div class="entity-meta">${info.type} · ${dCount} disruption(s) · ${info.scraped} article(s)</div>
+      <span class="badge ${badgeClass}">${badgeLabel}</span>
     `;
     entityGrid.appendChild(card);
   });
 
-  // --- article list ---
+  // --- article list: show scored articles with extraction data ---
   const articleList = document.getElementById("article-list");
   articleList.innerHTML = "";
 
-  (run.results || [])
-    .filter((r) => r.scrape_ok)
-    .forEach((r) => {
-      const card = document.createElement("div");
-      card.className = "article-card";
-      card.innerHTML = `
-        <div class="article-top">
-          <span>${r.domain} · ${r.anchor} (${r.query_type})</span>
-          <span>${r.gkg_date}</span>
-        </div>
-        <a href="${r.url}" target="_blank" rel="noopener noreferrer">${r.url}</a>
-        <div class="snippet">${(r.snippet || "").slice(0, 240)}…</div>
-      `;
-      articleList.appendChild(card);
-    });
+  const articlesToShow = run.scored_articles && run.scored_articles.length > 0
+    ? run.scored_articles
+    : (run.results || []).filter((r) => r.scrape_ok);
 
-  if ((run.results || []).filter((r) => r.scrape_ok).length === 0) {
+  articlesToShow.forEach((r) => {
+    const ext = r.extraction || {};
+    const isDisruption = ext.is_disruption;
+    const sev = ext.severity || "";
+
+    const card = document.createElement("div");
+    card.className = "article-card" + (isDisruption ? " is-disruption" : "");
+
+    let extractionHtml = "";
+    if (ext.event_type && ext.event_type !== "NONE") {
+      const sevBadge = sev && sev !== "NONE"
+        ? `<span class="sev-badge sev-${sev}" style="font-size:10px;padding:2px 5px">${sev}</span>`
+        : "";
+      extractionHtml = `
+        <div class="extraction">
+          <div class="ext-field"><span class="ext-label">Type</span><span class="ext-val">${ext.event_type}</span></div>
+          ${sev && sev !== "NONE" ? `<div class="ext-field">${sevBadge}</div>` : ""}
+          ${ext.event_summary ? `<div class="ext-field" style="flex-basis:100%"><span class="ext-label">Summary&nbsp;</span><span class="ext-val">${ext.event_summary}</span></div>` : ""}
+        </div>
+      `;
+    }
+
+    card.innerHTML = `
+      <div class="article-top">
+        <span>${r.domain} · ${r.anchor} (${r.query_type})</span>
+        <span>${r.gkg_date}</span>
+      </div>
+      <a href="${r.url}" target="_blank" rel="noopener noreferrer">${r.url}</a>
+      <div class="snippet">${(r.snippet || "").slice(0, 240)}…</div>
+      ${extractionHtml}
+    `;
+    articleList.appendChild(card);
+  });
+
+  if (articlesToShow.length === 0) {
     articleList.innerHTML = '<div class="empty-state">No articles were successfully scraped this run.</div>';
   }
 }

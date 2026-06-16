@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 import db
 from query_generator import validate_profile, ProfileValidationError
 from gdelt_fetch import run_pipeline
+from relevance_filter import filter_articles
+from deep_scorer import deep_score_articles, deduplicate_disruptions, generate_all_briefings
 
 load_dotenv()
 
@@ -112,6 +114,7 @@ def api_run_pipeline(client_id):
         log_lines.append(msg)
 
     try:
+        # Stage 2: BigQuery fetch + scrape
         run_result = run_pipeline(
             profile,
             days_back=days_back,
@@ -119,11 +122,47 @@ def api_run_pipeline(client_id):
             max_queries=max_queries,
             max_tokens=max_tokens,
             polite_delay=polite_delay,
-            discover_mode=DISCOVER_MODE,   # dev-only env flag, never user input
+            discover_mode=DISCOVER_MODE,
             progress_callback=progress,
         )
+
+        # Stage 3: metadata pre-filter (LLM on GDELT metadata only, no scrape cost)
+        scraped_articles = [r for r in run_result.get("results", []) if r.get("scrape_ok")]
+        progress(f"Stage 3: pre-filtering {len(scraped_articles)} scraped articles…")
+        prefilter_result = filter_articles(profile, scraped_articles, progress_callback=progress)
+        run_result["prefilter"] = {
+            "n_input": prefilter_result["n_input"],
+            "n_passed": prefilter_result["n_passed"],
+            "n_dropped": prefilter_result["n_dropped"],
+        }
+
+        # Stage 4: deep scoring on full article text (Nemotron)
+        passed_articles = prefilter_result["passed"]
+        progress(f"Stage 4: deep scoring {len(passed_articles)} articles with Nemotron…")
+        score_result = deep_score_articles(profile, passed_articles, progress_callback=progress)
+        run_result["deep_score"] = {
+            "n_input": score_result["n_input"],
+            "n_disruptions": score_result["n_disruptions"],
+        }
+        # Attach scored articles back onto results (so UI can show extraction data)
+        run_result["scored_articles"] = score_result["scored"]
+
+        # Stage 5: smart deduplication
+        progress(f"Stage 5: deduplicating {score_result['n_disruptions']} confirmed disruptions…")
+        dedup_result = deduplicate_disruptions(score_result["disruptions"], progress_callback=progress)
+        run_result["dedup"] = {
+            "n_input": dedup_result["n_input"],
+            "n_kept": dedup_result["n_kept"],
+            "n_dropped": dedup_result["n_dropped"],
+            "n_clusters": len(dedup_result["clusters"]),
+        }
+
+        # Stage 6: briefing generation (one brief per event cluster)
+        progress(f"Stage 6: generating briefings for {len(dedup_result['clusters'])} event clusters…")
+        briefings = generate_all_briefings(profile, dedup_result, progress_callback=progress)
+        run_result["briefings"] = briefings
+
     except RuntimeError as e:
-        # e.g. GOOGLE_CLOUD_PROJECT not set
         return jsonify({"error": str(e)}), 500
     except Exception as e:
         traceback.print_exc()

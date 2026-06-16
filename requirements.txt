@@ -1,5 +1,16 @@
-flask
-python-dotenv
-google-cloud-bigquery
-db-dtypes
-trafilatura
+# Web framework
+flask>=3.0.0
+python-dotenv>=1.0.0
+
+# Google BigQuery (GDELT fetch)
+google-cloud-bigquery>=3.11.0
+
+# Article scraping
+trafilatura>=1.12.0
+
+# HTTP client (OpenRouter LLM calls in llm_client.py)
+requests>=2.31.0
+
+# --- Development / optional ---
+# Uncomment if you want the BigQuery storage API for faster result streaming:
+# google-cloud-bigquery-storage>=2.24.0
