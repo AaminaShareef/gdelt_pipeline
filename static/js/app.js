@@ -373,7 +373,7 @@ function renderKPIs(data) {
     { label: 'Disruptions Found',   val: ds.n_disruptions ?? '—',      sub: 'confirmed by Nemotron', color: 'amber' },
     { label: 'Unique Events Kept',  val: dd.n_kept ?? '—',             sub: `${dd.n_dropped ?? 0} duplicates removed`, color: 'green' },
     { label: 'Event Clusters',      val: dd.n_clusters ?? brf.length ?? '—', sub: 'briefings generated', color: 'indigo' },
-    { label: 'LLM Verifications',   val: dd.n_llm_verification_calls ?? '—', sub: 'dedup calls made', color: 'cyan' },
+    { label: 'Duplicates Dropped',  val: dd.n_dropped ?? '—',          sub: 'merged into kept articles', color: 'cyan' },
   ];
 
   const row = document.getElementById('kpi-row');
@@ -545,7 +545,7 @@ function loadDemoData() {
     bytes_scanned: 4.2e9,
     prefilter: { n_input: 142, n_passed: 67, n_dropped: 75 },
     deep_score: { n_input: 67, n_disruptions: 18 },
-    dedup: { n_input: 18, n_kept: 11, n_dropped: 7, n_clusters: 5, n_llm_verification_calls: 6 },
+    dedup: { n_input: 18, n_kept: 11, n_dropped: 7, n_clusters: 5 },
     briefings: [
       {
         severity: 'HIGH',
@@ -621,7 +621,7 @@ function loadDemoData() {
       'Stage 4: deep scoring 67 articles with Nemotron…',
       'Deep scoring: 67/67 analyzed (18 confirmed disruptions so far)',
       'Stage 5: deduplicating 18 confirmed disruptions…',
-      'Deduplication: 18 disruption articles -> 5 clusters -> 11 unique articles kept (6 total LLM verification calls)',
+      'Deduplication: 18 disruption articles -> 5 clusters -> 11 unique articles kept',
       'Stage 6: generating briefings for 5 event clusters…',
       'Briefing 1/5 generated: Penang Flash Floods Halt Semiconductor Fabs',
       'Briefing 5/5 generated: Typhoon Gaemi Tracking Toward Taiwan Strait',
