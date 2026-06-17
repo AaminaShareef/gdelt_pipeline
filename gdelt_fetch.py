@@ -6,6 +6,13 @@ scrapes full article text via trafilatura. This module contains no
 hardcoded client data — it operates on whatever profile dict is passed
 to run_pipeline().
 
+Trusted sources: query_generator no longer exposes a single hardcoded
+TRUSTED_DOMAINS_SET. Each profile's trusted-source set is resolved
+per-profile (global + country-level + local + trade press — see
+query_generator.resolve_trusted_domains()). run_pipeline() resolves it
+once per call and uses that same set both to build queries and as the
+post-fetch is_trusted() safety net, so the two never drift apart.
+
 Auth: uses Application Default Credentials (ADC) via the gcloud CLI.
       Run once on this machine:  gcloud auth application-default login
       No service-account JSON file is used or required.
@@ -23,7 +30,8 @@ import trafilatura
 from query_generator import (
     generate_queries,
     audit_coverage,
-    TRUSTED_DOMAINS_SET,
+    resolve_trusted_domains,
+    is_trusted as _qg_is_trusted,
     MIN_VIABLE_TOKENS,
 )
 
@@ -100,9 +108,22 @@ def _root_domain(url: str) -> str:
     return m.group(1).lower() if m else ""
 
 
-def is_trusted(url: str) -> bool:
+def is_trusted(url: str, trusted_domains) -> bool:
+    """
+    Post-fetch safety net (doc Principle 5). `trusted_domains` is this
+    profile's resolved "all" set from query_generator.resolve_trusted_domains()
+    — there is no longer a single global TRUSTED_DOMAINS_SET, since trust
+    is now resolved per-profile (global + country-level + local + trade
+    press). Subdomains are accepted (e.g. 'asia.nikkei.com' for
+    'nikkei.com') via suffix match on top of query_generator.is_trusted()'s
+    exact match.
+    """
     domain = _root_domain(url)
-    return any(domain == td or domain.endswith("." + td) for td in TRUSTED_DOMAINS_SET)
+    if not domain:
+        return False
+    if _qg_is_trusted(domain, trusted_domains):
+        return True
+    return any(domain.endswith("." + td.lower()) for td in trusted_domains)
 
 
 def truncate_tokens(text: str, max_tokens: int = 500):
@@ -168,12 +189,28 @@ def run_pipeline(
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(days=days_back)
 
+    # Resolve this profile's trusted-source set ONCE up front (global +
+    # country-level + local [LLM-identified for unknown countries] +
+    # trade press). generate_queries() resolves the same set internally
+    # for the SQL domain filter; we resolve it again here (cheap — hits
+    # the in-process local-source cache) so the post-fetch is_trusted()
+    # safety net and the run summary use the identical set.
+    trust = resolve_trusted_domains(profile, use_llm=not discover_mode)
+    trusted_domains = trust["all"]
+
     queries = generate_queries(profile, domain_filter=not discover_mode)
     if max_queries:
         queries = queries[:max_queries]
 
     _log(f"Generated {len(queries)} queries for client '{profile['client_id']}'")
     _log(f"Mode: {'DISCOVER (no domain filter)' if discover_mode else 'FILTERED (trusted domains only)'}")
+    if not discover_mode:
+        _log(
+            f"Trusted domains: {len(trust['global'])} global, "
+            f"{len(trust['country_level'])} country-level, "
+            f"{len(trust['local'])} local, {len(trust['trade_press'])} trade press "
+            f"({len(trusted_domains)} total)"
+        )
 
     seen_urls = set()
     results = []
@@ -206,7 +243,7 @@ def run_pipeline(
             row_domain = row.get("domain") or _root_domain(url)
             all_domains_seen[row_domain] = all_domains_seen.get(row_domain, 0) + 1
 
-            if not discover_mode and not is_trusted(url):
+            if not discover_mode and not is_trusted(url, trusted_domains):
                 n_filtered_domain += 1
                 continue
 
@@ -246,6 +283,7 @@ def run_pipeline(
         "n_scraped_ok": ok,
         "n_scraped_total": len(results),
         "domains_seen": all_domains_seen,
+        "trusted_domains": trust,
         "coverage": audit_coverage(profile),
         "results": results,
     }

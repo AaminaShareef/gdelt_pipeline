@@ -4,114 +4,321 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SCDI — Supply Chain Disruption Intelligence</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="static/css/style.css">
 </head>
 <body>
 
-  <header class="topbar">
-    <div class="topbar-inner">
-      <span class="brand">SCDI</span>
-      <span class="brand-sub">Supply Chain Disruption Intelligence</span>
+  <!-- ===================== PAGE 1: LANDING ===================== -->
+  <div id="page-landing" class="page active">
+    <div class="landing-bg">
+      <div class="radar-ring r1"></div>
+      <div class="radar-ring r2"></div>
+      <div class="radar-ring r3"></div>
+      <div class="radar-sweep"></div>
+      <div class="grid-overlay"></div>
     </div>
-  </header>
 
-  <main class="layout">
+    <nav class="topnav">
+      <div class="brand">
+        <span class="brand-icon">◈</span>
+        <span class="brand-name">SCDI</span>
+        <span class="brand-sub">Intelligence Platform</span>
+      </div>
+      <div class="nav-status">
+        <span class="status-dot active-dot"></span>
+        <span class="status-label">System Operational</span>
+      </div>
+    </nav>
 
-    <!-- ===================== LEFT: CLIENT PROFILE FORM ===================== -->
-    <section class="panel profile-panel">
-      <h2>Client Profile</h2>
-      <p class="hint">Enter the client's supply chain. Each section maps to one of the four entity types the pipeline searches for.</p>
+    <div class="landing-hero">
+      <div class="hero-eyebrow">Supply Chain Disruption Intelligence</div>
+      <h1 class="hero-title">
+        Know before<br/>
+        <span class="hero-accent">risk arrives.</span>
+      </h1>
+      <p class="hero-desc">
+        Real-time disruption monitoring powered by GDELT, Nemotron, and LexRank deduplication — tuned to your exact supply chain.
+      </p>
 
-      <form id="profile-form">
+      <div class="choice-cards">
+        <button class="choice-card" id="btn-existing" onclick="selectMode('existing')">
+          <div class="choice-card-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+            </svg>
+          </div>
+          <div class="choice-card-body">
+            <div class="choice-card-title">Existing Client</div>
+            <div class="choice-card-desc">Load a saved supply chain profile and run the pipeline.</div>
+          </div>
+          <div class="choice-card-arrow">→</div>
+        </button>
 
-        <div class="field">
-          <label for="client_id">Client ID</label>
-          <input type="text" id="client_id" name="client_id" placeholder="e.g. brightarc_electronics" required />
+        <button class="choice-card" id="btn-new" onclick="selectMode('new')">
+          <div class="choice-card-icon new-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 4v16m8-8H4"/>
+            </svg>
+          </div>
+          <div class="choice-card-body">
+            <div class="choice-card-title">New Client</div>
+            <div class="choice-card-desc">Define a new supply chain profile and begin monitoring.</div>
+          </div>
+          <div class="choice-card-arrow">→</div>
+        </button>
+      </div>
+    </div>
+
+    <div class="landing-stats">
+      <div class="stat-item"><span class="stat-val">6</span><span class="stat-label">Pipeline Stages</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat-item"><span class="stat-val">3</span><span class="stat-label">LLM Models</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat-item"><span class="stat-val">LexRank</span><span class="stat-label">Deduplication</span></div>
+      <div class="stat-divider"></div>
+      <div class="stat-item"><span class="stat-val">GDELT</span><span class="stat-label">Data Source</span></div>
+    </div>
+  </div>
+
+  <!-- ===================== PAGE 2a: SELECT EXISTING ===================== -->
+  <div id="page-existing" class="page">
+    <div class="sub-bg"></div>
+    <div class="page-inner">
+      <button class="back-btn" onclick="goBack('landing')">← Back</button>
+      <div class="page-header">
+        <div class="page-eyebrow">Existing Profile</div>
+        <h2 class="page-title">Select a client</h2>
+        <p class="page-desc">Choose a saved supply chain profile to analyse.</p>
+      </div>
+
+      <div id="profiles-loading" class="loading-state">
+        <div class="spinner"></div>
+        <span>Loading profiles…</span>
+      </div>
+
+      <div id="profiles-list" class="profiles-grid" style="display:none"></div>
+
+      <div id="profiles-empty" class="empty-state" style="display:none">
+        <div class="empty-icon">◎</div>
+        <div class="empty-title">No profiles yet</div>
+        <div class="empty-desc">Create a new client profile to get started.</div>
+        <button class="btn-primary" onclick="selectMode('new')">Create New Profile</button>
+      </div>
+
+      <div id="selected-profile-bar" class="selected-bar" style="display:none">
+        <div class="selected-bar-info">
+          <span class="selected-label">Selected:</span>
+          <span id="selected-client-name" class="selected-name"></span>
+        </div>
+        <div class="pipeline-opts">
+          <div class="opt-row">
+            <label>Days back</label>
+            <input type="number" id="ex-days-back" value="7" min="1" max="30" class="num-input" />
+          </div>
+          <div class="opt-row">
+            <label>Articles / query</label>
+            <input type="number" id="ex-articles-per-query" value="15" min="5" max="50" class="num-input" />
+          </div>
+        </div>
+        <button class="btn-analyse" onclick="runExistingProfile()">
+          <span class="btn-analyse-icon">⚡</span>
+          Analyse Disruptions
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== PAGE 2b: NEW PROFILE ===================== -->
+  <div id="page-new" class="page">
+    <div class="sub-bg"></div>
+    <div class="page-inner wide">
+      <button class="back-btn" onclick="goBack('landing')">← Back</button>
+      <div class="page-header">
+        <div class="page-eyebrow">New Profile</div>
+        <h2 class="page-title">Define your supply chain</h2>
+        <p class="page-desc">Fill in the entities you want monitored. The pipeline builds GDELT queries from this profile.</p>
+      </div>
+
+      <form id="new-profile-form" onsubmit="return false">
+        <div class="form-section">
+          <div class="form-section-label">Client Identity</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Client ID <span class="req">*</span></label>
+              <input type="text" id="f-client-id" class="form-input" placeholder="e.g. acme-electronics" />
+              <div class="form-hint">Unique slug — no spaces, use hyphens.</div>
+            </div>
+          </div>
         </div>
 
-        <!-- TIER-1 SUPPLIERS -->
-        <fieldset>
-          <legend>Tier-1 Suppliers</legend>
+        <div class="form-section">
+          <div class="form-section-label">Tier-1 Suppliers</div>
           <div id="suppliers-list"></div>
-          <button type="button" class="btn-add" data-add="supplier">+ Add supplier</button>
-        </fieldset>
+          <button type="button" class="add-btn" onclick="addSupplier()">+ Add Supplier</button>
+        </div>
 
-        <!-- RAW MATERIALS -->
-        <fieldset>
-          <legend>Raw Materials</legend>
+        <div class="form-section">
+          <div class="form-section-label">Raw Materials</div>
           <div id="materials-list"></div>
-          <button type="button" class="btn-add" data-add="material">+ Add material</button>
-        </fieldset>
+          <button type="button" class="add-btn" onclick="addMaterial()">+ Add Material</button>
+        </div>
 
-        <!-- LOGISTICS -->
-        <fieldset>
-          <legend>Logistics Nodes</legend>
+        <div class="form-section">
+          <div class="form-section-label">Logistics</div>
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label class="form-label">Ports (one per line)</label>
+              <textarea id="f-ports" class="form-input form-textarea" placeholder="Port of Rotterdam&#10;Port of Busan"></textarea>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Carriers (one per line)</label>
+              <textarea id="f-carriers" class="form-input form-textarea" placeholder="Maersk&#10;FedEx"></textarea>
+            </div>
+          </div>
+        </div>
 
-          <div class="sub-label">Ports</div>
-          <div id="ports-list"></div>
-          <button type="button" class="btn-add" data-add="port">+ Add port</button>
-
-          <div class="sub-label">Carriers</div>
-          <div id="carriers-list"></div>
-          <button type="button" class="btn-add" data-add="carrier">+ Add carrier</button>
-        </fieldset>
-
-        <!-- OWN FACILITIES -->
-        <fieldset>
-          <legend>Own Facilities</legend>
+        <div class="form-section">
+          <div class="form-section-label">Own Facilities</div>
           <div id="facilities-list"></div>
-          <button type="button" class="btn-add" data-add="facility">+ Add facility</button>
-        </fieldset>
-
-        <div class="form-actions">
-          <button type="submit" class="btn-primary">Save profile</button>
+          <button type="button" class="add-btn" onclick="addFacility()">+ Add Facility</button>
         </div>
+
+        <div class="form-section">
+          <div class="form-section-label">Pipeline Options</div>
+          <div class="form-row three-col">
+            <div class="form-group">
+              <label class="form-label">Days back</label>
+              <input type="number" id="f-days-back" value="7" min="1" max="30" class="form-input" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Articles / query</label>
+              <input type="number" id="f-articles-per-query" value="15" min="5" max="50" class="form-input" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Max tokens</label>
+              <input type="number" id="f-max-tokens" value="500" min="100" max="2000" class="form-input" />
+            </div>
+          </div>
+        </div>
+
+        <button type="button" class="btn-analyse full-width" onclick="submitNewProfile()">
+          <span class="btn-analyse-icon">⚡</span>
+          Save & Analyse Disruptions
+        </button>
       </form>
+    </div>
+  </div>
 
-      <div id="profile-status" class="status-msg" role="status"></div>
-
-      <hr />
-
-      <h3>Saved Profiles</h3>
-      <div id="saved-profiles-list" class="saved-list"></div>
-    </section>
-
-    <!-- ===================== RIGHT: DASHBOARD ===================== -->
-    <section class="panel dashboard-panel">
-      <div class="dashboard-header">
-        <h2>Dashboard</h2>
-        <div class="run-controls">
-          <select id="active-client-select">
-            <option value="">Select a client…</option>
-          </select>
-          <button id="run-pipeline-btn" class="btn-primary" disabled>Run analysis</button>
+  <!-- ===================== PAGE 3: RUNNING ===================== -->
+  <div id="page-running" class="page">
+    <div class="running-bg">
+      <div class="pulse-ring p1"></div>
+      <div class="pulse-ring p2"></div>
+    </div>
+    <div class="running-inner">
+      <div class="running-icon">◈</div>
+      <div class="running-title">Pipeline Running</div>
+      <div class="running-client" id="running-client-label"></div>
+      <div class="stage-list" id="stage-list">
+        <div class="stage-item" data-stage="1">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 1 — Query Generation</div>
+          <div class="stage-status"></div>
+        </div>
+        <div class="stage-item" data-stage="2">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 2 — GDELT Fetch + Scrape</div>
+          <div class="stage-status"></div>
+        </div>
+        <div class="stage-item" data-stage="3">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 3 — Relevance Pre-filter</div>
+          <div class="stage-status"></div>
+        </div>
+        <div class="stage-item" data-stage="4">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 4 — Deep Scoring (Nemotron)</div>
+          <div class="stage-status"></div>
+        </div>
+        <div class="stage-item" data-stage="5">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 5 — LexRank Deduplication</div>
+          <div class="stage-status"></div>
+        </div>
+        <div class="stage-item" data-stage="6">
+          <div class="stage-dot"></div>
+          <div class="stage-text">Stage 6 — Briefing Generation</div>
+          <div class="stage-status"></div>
         </div>
       </div>
+      <div class="log-box" id="log-box"></div>
+    </div>
+  </div>
 
-      <div id="run-log" class="run-log" aria-live="polite"></div>
+  <!-- ===================== PAGE 4: DASHBOARD ===================== -->
+  <div id="page-dashboard" class="page">
+    <div class="sub-bg"></div>
 
-      <div id="dashboard-empty" class="empty-state">
-        Select a client and click <strong>Run analysis</strong> to fetch and score disruption news for their supply chain.
+    <nav class="dash-nav">
+      <div class="brand">
+        <span class="brand-icon">◈</span>
+        <span class="brand-name">SCDI</span>
+      </div>
+      <div class="dash-client-badge" id="dash-client-badge"></div>
+      <div class="dash-nav-actions">
+        <button class="ghost-btn" onclick="goBack('landing')">New Analysis</button>
+      </div>
+    </nav>
+
+    <div class="dash-content">
+
+      <!-- KPI Row -->
+      <div class="kpi-row" id="kpi-row"></div>
+
+      <!-- Briefings -->
+      <div class="section-header">
+        <div class="section-title">Disruption Briefings</div>
+        <div class="section-sub" id="briefing-count"></div>
+      </div>
+      <div class="briefings-grid" id="briefings-grid"></div>
+
+      <!-- Pipeline Summary -->
+      <div class="section-header" style="margin-top:2.5rem">
+        <div class="section-title">Pipeline Summary</div>
+      </div>
+      <div class="pipeline-summary-grid" id="pipeline-summary-grid"></div>
+
+      <!-- Scored Articles -->
+      <div class="section-header" style="margin-top:2.5rem">
+        <div class="section-title">Article Intelligence</div>
+        <div class="section-sub" id="article-count"></div>
+      </div>
+      <div class="articles-table-wrap">
+        <table class="articles-table" id="articles-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Date</th>
+              <th>Anchor</th>
+              <th>Event Type</th>
+              <th>Severity</th>
+              <th>Score</th>
+              <th>Disruption</th>
+            </tr>
+          </thead>
+          <tbody id="articles-tbody"></tbody>
+        </table>
       </div>
 
-      <div id="dashboard-content" class="dashboard-content" hidden>
-        <div class="summary-row" id="summary-row"></div>
+    </div>
+  </div>
 
-        <div class="pipeline-stats" id="pipeline-stats"></div>
+  <!-- ===================== TOAST ===================== -->
+  <div id="toast" class="toast"></div>
 
-        <h3>Disruption Briefings</h3>
-        <div id="briefings-list" class="briefings-list"></div>
-
-        <h3>Entity Status</h3>
-        <div id="entity-grid" class="entity-grid"></div>
-
-        <h3>Source Articles</h3>
-        <div id="article-list" class="article-list"></div>
-      </div>
-    </section>
-
-  </main>
-
-  <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+  <script src="static/js/app.js"></script>
 </body>
 </html>
